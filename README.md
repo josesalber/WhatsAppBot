@@ -1,5 +1,5 @@
 # wspbot
-# 📱 WhatsApp Messaging Bot
+# 📱 WhatsApp Bot
 
 Sistema profesional de mensajería masiva de WhatsApp con autenticación JWT, gestión multi-usuario y envío inteligente de mensajes personalizados.
 
