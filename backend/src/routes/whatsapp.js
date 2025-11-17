@@ -15,5 +15,6 @@ router.post('/force-new-session', whatsappController.forceNewSession); // Nueva 
 router.get('/historial', whatsappController.getHistorial);
 router.get('/debug', whatsappController.getDebugInfo);
 router.get('/sessions', whatsappController.getActiveSessions); // Nueva ruta para ver sesiones
+router.get('/sending-progress', whatsappController.getSendingProgress); // Nueva ruta para progreso en tiempo real
 
 module.exports = router;

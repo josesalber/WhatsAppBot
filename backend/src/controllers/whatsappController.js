@@ -7,6 +7,8 @@ class WhatsAppController {
     constructor() {
         // Manejar múltiples instancias por usuario
         this.userInstances = new Map(); // userId -> { bot, qrCode, isReady, qrCheckInterval }
+        // Manejar progreso de envíos masivos por usuario
+        this.sendingProgress = new Map(); // userId -> { total, sent, failed, inProgress, startTime }
     }
 
     // Obtener o crear instancia para un usuario específico
@@ -210,7 +212,7 @@ class WhatsAppController {
                 }
             }
 
-            const { contacts, message } = req.body;
+            const { contacts, message, imageBase64 } = req.body;
             
             if (!contacts || !Array.isArray(contacts) || contacts.length === 0) {
                 return res.status(400).json({ error: 'Lista de contactos requerida' });
@@ -218,6 +220,31 @@ class WhatsAppController {
 
             if (!message) {
                 return res.status(400).json({ error: 'Mensaje requerido' });
+            }
+
+            // Validar imagen si está presente
+            if (imageBase64) {
+                try {
+                    // Validar formato base64
+                    const base64Match = imageBase64.match(/^data:image\/(jpeg|jpg|png|gif|webp);base64,/);
+                    if (!base64Match) {
+                        return res.status(400).json({ error: 'Formato de imagen inválido' });
+                    }
+                    
+                    // Calcular tamaño aproximado
+                    const sizeInBytes = Math.round((imageBase64.length * 3) / 4);
+                    const sizeInKB = Math.round(sizeInBytes / 1024);
+                    
+                    console.log(`🖼️ Imagen detectada para envío masivo (usuario ${userId}): ${base64Match[1].toUpperCase()}, ~${sizeInKB}KB`);
+                    
+                    // Validar tamaño máximo (5MB después de base64)
+                    if (sizeInBytes > 5 * 1024 * 1024) {
+                        return res.status(400).json({ error: 'Imagen demasiado grande (máximo 5MB)' });
+                    }
+                } catch (error) {
+                    console.error('Error validando imagen:', error);
+                    return res.status(400).json({ error: 'Error al validar la imagen' });
+                }
             }
 
             // Verificar límite diario
@@ -250,15 +277,16 @@ class WhatsAppController {
             // Responder inmediatamente al frontend que el envío ha comenzado
             res.json({
                 success: true,
-                message: `Envío masivo iniciado. ${processedContacts.length} mensajes se están enviando en segundo plano.`,
+                message: `Envío masivo iniciado. ${processedContacts.length} mensajes se están enviando en segundo plano${imageBase64 ? ' con imagen 🖼️' : ''}.`,
                 totalToSend: processedContacts.length,
                 userId: userId,
                 userName: userName,
-                backgroundProcess: true
+                backgroundProcess: true,
+                withImage: !!imageBase64
             });
 
             // Ejecutar el envío en segundo plano para que no se cancele
-            this.processBulkMessagesBackground(userId, userName, processedContacts, message, instance);
+            this.processBulkMessagesBackground(userId, userName, processedContacts, message, instance, imageBase64);
 
         } catch (error) {
             console.error('Error al iniciar envío masivo:', error);
@@ -267,11 +295,33 @@ class WhatsAppController {
     };
 
     // Nuevo método para procesar mensajes en segundo plano
-    processBulkMessagesBackground = async (userId, userName, processedContacts, message, instance) => {
+    processBulkMessagesBackground = async (userId, userName, processedContacts, message, instance, imageBase64 = null) => {
         try {
-            console.log(`🚀 Iniciando envío de ${processedContacts.length} mensajes para usuario ${userName} (ID: ${userId}) en segundo plano`);
+            console.log(`🚀 Iniciando envío de ${processedContacts.length} mensajes para usuario ${userName} (ID: ${userId}) en segundo plano${imageBase64 ? ' con imagen 🖼️' : ''}`);
             
-            const results = await instance.bot.sendBulkMessages(processedContacts, message);
+            // Inicializar progreso
+            this.sendingProgress.set(userId, {
+                total: processedContacts.length,
+                sent: 0,
+                failed: 0,
+                inProgress: true,
+                startTime: Date.now()
+            });
+            
+            const results = await instance.bot.sendBulkMessages(
+                processedContacts, 
+                message, 
+                imageBase64,
+                // Callback para actualizar progreso en tiempo real
+                (sent, failed) => {
+                    const progress = this.sendingProgress.get(userId);
+                    if (progress) {
+                        progress.sent = sent;
+                        progress.failed = failed;
+                        console.log(`📊 Progreso [Usuario ${userId}]: ${sent + failed}/${progress.total} (${sent} ✅, ${failed} ❌)`);
+                    }
+                }
+            );
 
             // Registrar envíos en la base de datos
             for (let i = 0; i < results.length; i++) {
@@ -290,10 +340,24 @@ class WhatsAppController {
             const failCount = results.filter(r => !r.success).length;
             
             console.log(`✅ Envío completado para usuario ${userName} (ID: ${userId}): ${successCount} exitosos, ${failCount} fallidos`);
-            console.log(`� Detalles del envío - Total: ${processedContacts.length}, Exitosos: ${successCount}, Fallidos: ${failCount}`);
+            console.log(`📊 Detalles del envío - Total: ${processedContacts.length}, Exitosos: ${successCount}, Fallidos: ${failCount}`);
+            
+            // Marcar como completado
+            const progress = this.sendingProgress.get(userId);
+            if (progress) {
+                progress.inProgress = false;
+                progress.sent = successCount;
+                progress.failed = failCount;
+            }
 
         } catch (error) {
             console.error(`❌ Error en envío masivo para usuario ${userName} (ID: ${userId}):`, error);
+            
+            // Marcar como error
+            const progress = this.sendingProgress.get(userId);
+            if (progress) {
+                progress.inProgress = false;
+            }
         }
     };
 
@@ -515,6 +579,53 @@ class WhatsAppController {
             
         } catch (error) {
             console.error('Error al listar sesiones:', error);
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    // Nuevo método: Obtener progreso de envío en tiempo real
+    getSendingProgress = async (req, res) => {
+        try {
+            const userId = req.usuario.id;
+            const progress = this.sendingProgress.get(userId);
+            
+            if (!progress) {
+                return res.json({
+                    success: true,
+                    inProgress: false,
+                    message: 'No hay envío en progreso'
+                });
+            }
+            
+            // Calcular porcentaje
+            const percentage = progress.total > 0 
+                ? Math.round((progress.sent + progress.failed) / progress.total * 100)
+                : 0;
+            
+            // Calcular tiempo transcurrido
+            const elapsed = Date.now() - progress.startTime;
+            const elapsedSeconds = Math.round(elapsed / 1000);
+            
+            // Estimar tiempo restante
+            const messagesProcessed = progress.sent + progress.failed;
+            const avgTimePerMessage = messagesProcessed > 0 ? elapsed / messagesProcessed : 0;
+            const messagesRemaining = progress.total - messagesProcessed;
+            const estimatedTimeRemaining = Math.round(avgTimePerMessage * messagesRemaining / 1000);
+            
+            res.json({
+                success: true,
+                inProgress: progress.inProgress,
+                total: progress.total,
+                sent: progress.sent,
+                failed: progress.failed,
+                current: progress.sent + progress.failed,
+                percentage: percentage,
+                elapsedSeconds: elapsedSeconds,
+                estimatedSecondsRemaining: estimatedTimeRemaining
+            });
+            
+        } catch (error) {
+            console.error('Error al obtener progreso:', error);
             res.status(500).json({ error: 'Error interno del servidor' });
         }
     };

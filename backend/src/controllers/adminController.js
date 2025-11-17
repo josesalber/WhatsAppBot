@@ -2,7 +2,7 @@ const Usuario = require('../models/Usuario');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 // URL de la API central
-const CENTRAL_API_URL = process.env.CENTRAL_API_URL || 'http://172.17.249.98:9095/api';
+const CENTRAL_API_URL = process.env.CENTRAL_API_URL || 'http://172.17.248.180:9095/api';
 
 // Función para verificar DNI en API central
 // Estrategia: Primero intentar obtener lista completa, si falla buscar por IDs

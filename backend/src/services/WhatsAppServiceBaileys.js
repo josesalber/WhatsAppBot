@@ -1,13 +1,9 @@
-const { 
-    default: makeWASocket, 
-    DisconnectReason, 
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion 
-} = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
 const EventEmitter = require('events');
 const path = require('path');
 const fs = require('fs');
+
+// Variables para módulos ESM cargados dinámicamente
+let makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, Boom;
 
 class WhatsAppServiceBaileys extends EventEmitter {
     constructor(userId = null) {
@@ -16,14 +12,29 @@ class WhatsAppServiceBaileys extends EventEmitter {
         this.isReady = false;
         this.userId = userId;
         this.qrCode = null;
-        this.isInitializing = false; // Prevenir múltiples inicializaciones
-        this.isSending = false; // Para deshabilitar reconexiones durante envío
+        this.isInitializing = false;
+        this.isSending = false;
         this.authState = null;
         this.saveCreds = null;
     }
 
     async initialize(forceNew = false) {
         try {
+            // Cargar Baileys dinámicamente (ESM en CommonJS)
+            if (!makeWASocket) {
+                console.log('📦 Cargando módulos ESM de Baileys v7...');
+                const baileys = await import('@whiskeysockets/baileys');
+                makeWASocket = baileys.default;
+                DisconnectReason = baileys.DisconnectReason;
+                useMultiFileAuthState = baileys.useMultiFileAuthState;
+                fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+                
+                const boomModule = await import('@hapi/boom');
+                Boom = boomModule.Boom;
+                
+                console.log('✅ Módulos ESM cargados correctamente');
+            }
+
             // Prevenir múltiples inicializaciones simultáneas
             if (this.isInitializing) {
                 console.log(`⚠️ Ya hay una inicialización en progreso para usuario ${this.userId}`);
@@ -50,7 +61,7 @@ class WhatsAppServiceBaileys extends EventEmitter {
             }
             
             const cleanUserId = this.userId ? String(this.userId).replace(/[^a-zA-Z0-9_-]/g, '') : 'default';
-            console.log(`🚀 Inicializando Baileys para usuario ${this.userId} (ID: ${cleanUserId})`);
+            console.log(`🚀 Inicializando Baileys v7 para usuario ${this.userId} (ID: ${cleanUserId})`);
             
             // Configurar sesión independiente por usuario
             const sessionPath = this.userId ? 
@@ -72,6 +83,7 @@ class WhatsAppServiceBaileys extends EventEmitter {
             const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
             this.authState = state;
             this.saveCreds = saveCreds;
+            this.sessionPath = sessionPath;
 
             // Obtener la última versión de Baileys
             const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -89,25 +101,24 @@ class WhatsAppServiceBaileys extends EventEmitter {
                 fatal: console.error
             };
 
-            // Crear socket de conexión con configuración optimizada para conexiones lentas
+            // Crear socket de conexión con configuración optimizada para v7
             this.sock = makeWASocket({
                 version,
                 auth: this.authState,
                 printQRInTerminal: false,
-                defaultQueryTimeoutMs: 60000, // Aumentado para conexiones lentas
-                keepAliveIntervalMs: 30000,   // Más tolerante
+                defaultQueryTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
                 logger: logger,
                 browser: ['Bot WhatsApp', 'Desktop', '1.0.0'],
-                retryRequestDelayMs: 250,     // Delay entre reintentos
-                maxMsgRetryCount: 5,          // Más reintentos para mensajes
-                // Configuración adicional para estabilidad
-                emitOwnEvents: true,
-                markOnlineOnConnect: false,   // No marcar online automáticamente 
-                syncFullHistory: false,       // No sincronizar historial completo
+                retryRequestDelayMs: 250,
+                maxMsgRetryCount: 5,
+                emitOwnEvents: false,
+                markOnlineOnConnect: false,
+                syncFullHistory: false,
                 generateHighQualityLinkPreview: false,
-                shouldSyncHistoryMessage: () => false, // No sincronizar historial
+                shouldSyncHistoryMessage: () => false,
                 shouldIgnoreJid: () => false,
-                fireInitQueries: true,       // Inicializar queries inmediatamente
+                fireInitQueries: true,
                 getMessage: async (key) => {
                     return { conversation: 'Message not found' };
                 }
@@ -125,7 +136,7 @@ class WhatsAppServiceBaileys extends EventEmitter {
                     this.emit('qr', qr);
                 }
                 
-                // 🔍 Detectar cuando el QR se escanea (qr desaparece pero connection no es 'open' aún)
+                // Detectar cuando el QR se escanea
                 if (!qr && this.qrCode && connection !== 'open' && connection !== 'close') {
                     console.log(`🔄 QR escaneado para usuario ${this.userId} - procesando conexión...`);
                     this.qrCode = null;
@@ -134,57 +145,59 @@ class WhatsAppServiceBaileys extends EventEmitter {
 
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const errorData = lastDisconnect?.error?.data;
                     console.log(`❌ Conexión cerrada para usuario ${this.userId || 'default'}`);
                     console.log(`   Código: ${statusCode}, Razón: ${lastDisconnect?.error?.message}`);
+                    
+                    // Diagnóstico de credenciales
+                    if (statusCode === 401 || statusCode === 428) {
+                        console.log(`🔍 Verificando credenciales (código ${statusCode})...`);
+                        const credsPath = path.join(this.sessionPath, 'creds.json');
+                        if (fs.existsSync(credsPath)) {
+                            try {
+                                const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+                                console.log(`📄 Claves presentes:`, Object.keys(creds));
+                                
+                                const criticalKeys = ['me', 'signedIdentityKey', 'signedPreKey', 'registrationId'];
+                                const missingKeys = criticalKeys.filter(k => !creds[k]);
+                                if (missingKeys.length > 0) {
+                                    console.log(`⚠️ Faltan claves críticas:`, missingKeys);
+                                }
+                            } catch (readError) {
+                                console.log(`❌ Error leyendo creds.json:`, readError.message);
+                            }
+                        } else {
+                            console.log(`⚠️ No existe creds.json`);
+                        }
+                    }
                     
                     this.isReady = false;
                     this.emit('disconnected', lastDisconnect?.error?.message || 'Conexión cerrada');
                     
-                    // Para código 401 (no autorizado), solo limpiar credenciales SIN reiniciar automáticamente
-                    if (statusCode === 401 || statusCode === DisconnectReason.badSession) {
-                        console.log(`🔄 Código 401 detectado - limpiando credenciales...`);
+                    // Limpiar credenciales para códigos de error específicos
+                    if (statusCode === 401 || statusCode === 428 || statusCode === DisconnectReason.badSession) {
+                        console.log(`🔄 Código ${statusCode} detectado - limpiando credenciales...`);
                         setTimeout(async () => {
                             try {
-                                // Eliminar credenciales solamente
-                                const cleanUserId = this.userId ? String(this.userId).replace(/[^a-zA-Z0-9_-]/g, '') : 'default';
-                                const sessionPath = this.userId ? 
-                                    path.join(__dirname, '../..', 'baileys_sessions', `session_${cleanUserId}`) :
-                                    path.join(__dirname, '../..', 'baileys_sessions', 'default');
-                                
-                                if (fs.existsSync(sessionPath)) {
-                                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                                if (fs.existsSync(this.sessionPath)) {
+                                    fs.rmSync(this.sessionPath, { recursive: true, force: true });
                                     console.log(`🗑️ Credenciales eliminadas - usuario debe reconectar manualmente`);
                                 }
-                                
-                                // NO reinicializar automáticamente, dejar que el usuario presione "Conectar"
-                                
                             } catch (error) {
                                 console.log(`❌ Error limpiando credenciales: ${error.message}`);
                             }
                         }, 1000);
-                    }
-                    // Para otros errores, NO hacer reintentos automáticos que interfieren con la conexión
-                    else if (statusCode === DisconnectReason.loggedOut) {
-                        console.log(`🚪 Usuario cerró sesión manualmente - no reintentando`);
+                    } else if (statusCode === DisconnectReason.loggedOut) {
+                        console.log(`🚪 Usuario cerró sesión manualmente`);
                     } else if (statusCode === DisconnectReason.restartRequired) {
-                        console.log(`🔄 WhatsApp requiere reinicio - usuario debe reconectar manualmente`);
+                        console.log(`🔄 WhatsApp requiere reinicio`);
                     } else if (this.isSending) {
-                        console.log(`⏸️ No reconectando durante envío masivo para usuario ${this.userId}`);
-                    } else {
-                        console.log(`❌ Conexión cerrada (código ${statusCode}) - esperando reconexión manual`);
+                        console.log(`⏸️ No reconectando durante envío masivo`);
                     }
                 } else if (connection === 'connecting') {
                     console.log(`🔄 Conectando WhatsApp para usuario ${this.userId || 'default'}...`);
-                    // � NO agregar timeout aquí - dejar que WhatsApp maneje su propio timing
-                    
                 } else if (connection === 'open') {
                     console.log(`🎉 WhatsApp conectado exitosamente para usuario ${this.userId || 'default'}`);
-                    
-                    // Limpiar cualquier timeout existente
-                    if (this.connectionTimeout) {
-                        clearTimeout(this.connectionTimeout);
-                        this.connectionTimeout = null;
-                    }
                     
                     // Obtener información del usuario
                     try {
@@ -200,64 +213,69 @@ class WhatsAppServiceBaileys extends EventEmitter {
                     this.isReady = true;
                     this.qrCode = null;
                     this.emit('ready');
-                    console.log(`✅ Cliente Baileys listo para usuario ${this.userId || 'default'}`);
+                    console.log(`✅ Cliente Baileys v7 listo para usuario ${this.userId || 'default'}`);
                 }
             });
 
-            // Guardar credenciales cuando cambien
-            this.sock.ev.on('creds.update', this.saveCreds);
+            // Guardar credenciales cuando cambien - CRÍTICO para v7
+            this.sock.ev.on('creds.update', async () => {
+                try {
+                    if (!fs.existsSync(this.sessionPath)) {
+                        console.log(`📁 Creando directorio de sesión: ${this.sessionPath}`);
+                        fs.mkdirSync(this.sessionPath, { recursive: true });
+                    }
+                    await this.saveCreds();
+                    console.log(`💾 Credenciales guardadas (incluyendo lid-mapping/device-index)`);
+                } catch (error) {
+                    console.error(`❌ Error guardando credenciales para usuario ${this.userId}:`, error.message);
+                }
+            });
 
             // Manejar actualizaciones de mensajes
             this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
-                // Solo procesar mensajes nuevos
                 if (type === 'notify') {
                     for (const message of messages) {
                         if (!message.key.fromMe) {
-                            // Aquí se pueden manejar mensajes entrantes si es necesario
                             console.log(`📨 Mensaje recibido de ${message.key.remoteJid}`);
                         }
                     }
                 }
             });
 
-            this.isInitializing = false; // Marcar como completado
+            this.isInitializing = false;
 
         } catch (error) {
-            this.isInitializing = false; // Limpiar flag en caso de error
-            console.error(`❌ Error al inicializar Baileys para usuario ${this.userId || 'default'}:`, error);
+            this.isInitializing = false;
+            console.error(`❌ Error al inicializar Baileys v7 para usuario ${this.userId || 'default'}:`, error);
             throw error;
         }
     }
 
-    // Función para generar emoji aleatorio
     getRandomEmoji() {
         const emojis = [
             '😊', '🌟', '✨', '💫', '🎉', '🎊', '🎈','🍀',
-            '☀️', '⭐', '💎', '🎯', 
-            '🏆', '🎖️', '🏅', '🎁', '🔥','⚡','🥳', '😄', '😃', '😀', '😁', '🤩',
-            '🙂', '😌', '😋', '😎', '🤗', '🤭', '💪', '👏', '🙌', '👍',
-            '✌️', '🤞', '🤟', '👌', '🤘','💯', '✅'
+            '☀️', '⭐', '💎', '🎯', '🏆', '🎖️', '🏅', '🎁', 
+            '🔥','⚡','🥳', '😄', '😃', '😀', '😁', '🤩',
+            '🙂', '😌', '😋', '😎', '🤗', '🤭', '💪', '👏', 
+            '🙌', '👍', '✌️', '🤞', '🤟', '👌', '🤘','💯', '✅'
         ];
         return emojis[Math.floor(Math.random() * emojis.length)];
     }
 
-    // Función para personalizar mensaje - SIMPLIFICADO: solo emoji
     personalizeMessage(baseMessage, contactName) {
         const emoji = this.getRandomEmoji();
         return `${emoji} ${baseMessage}`;
     }
 
-    // Resolver JID (ID de chat) para Baileys
     resolveJid(phoneNumber) {
         const cleaned = phoneNumber.replace(/\D/g, '');
         
-        // Detectar automáticamente el país basado en la longitud
         let intl = cleaned;
         if (intl.length === 9) {
-            intl = '51' + intl; // Perú
+            intl = '51' + intl;
             console.log(`🇵🇪 Número peruano detectado: ${phoneNumber} -> ${intl}`);
         } else if (intl.length === 10) {
-            intl = '52' + intl; // México
+            intl = '52' + intl;
             console.log(`🇲🇽 Número mexicano detectado: ${phoneNumber} -> ${intl}`);
         }
         
@@ -266,35 +284,58 @@ class WhatsAppServiceBaileys extends EventEmitter {
         return jid;
     }
 
-    async sendBulkMessages(contacts, message) {
+    async sendBulkMessages(contacts, message, imageBase64 = null, progressCallback = null) {
         if (!this.isReady || !this.sock) {
             throw new Error('WhatsApp no está conectado');
         }
 
-        // 🛡️ Activar flag de envío para prevenir reconexiones
         this.isSending = true;
-        console.log('🔒 Modo envío activado - Reconexiones deshabilitadas');
+        console.log('🔒 Modo envío activado');
 
-        console.log(`🚀 Iniciando envío masivo con Baileys a ${contacts.length} contactos`);
+        const hasImage = !!imageBase64;
+        console.log(`🚀 Iniciando envío masivo v7 a ${contacts.length} contactos ${hasImage ? 'CON IMAGEN 🖼️' : ''}`);
         const results = [];
+        let sentCount = 0;
+        let failedCount = 0;
+        
+        let imageBuffer = null;
+        let imageMimetype = 'image/jpeg';
+        if (hasImage) {
+            try {
+                const mimetypeMatch = imageBase64.match(/^data:(image\/\w+);base64,/);
+                if (mimetypeMatch) {
+                    imageMimetype = mimetypeMatch[1];
+                }
+                
+                const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+                imageBuffer = Buffer.from(base64Data, 'base64');
+                
+                const sizeInKB = Math.round(imageBuffer.length / 1024);
+                console.log(`📸 Imagen procesada: ${sizeInKB}KB (${imageMimetype})`);
+                
+                if (imageBuffer.length === 0) {
+                    throw new Error('Buffer de imagen vacío');
+                }
+            } catch (error) {
+                console.error('❌ Error procesando imagen:', error);
+                throw new Error('Error al procesar la imagen');
+            }
+        }
         
         try {
             for (let i = 0; i < contacts.length; i++) {
                 const contact = contacts[i];
                 
                 try {
-                    // Verificar que el socket sigue activo
                     if (!this.sock || !this.isReady) {
                         throw new Error('Socket WhatsApp desconectado');
                     }
 
-                    // Resolver JID del contacto
                     const jid = this.resolveJid(contact.number);
 
-                    // Verificar si el número está registrado en WhatsApp
                     try {
-                        const [result] = await this.sock.onWhatsApp(jid);
-                        if (!result?.exists) {
+                        const results_check = await this.sock.onWhatsApp(jid);
+                        if (!results_check || results_check.length === 0) {
                             console.log(`❌ Número no registrado en WhatsApp: ${contact.number}`);
                             results.push({
                                 contact: contact.name,
@@ -302,6 +343,10 @@ class WhatsAppServiceBaileys extends EventEmitter {
                                 success: false,
                                 error: 'Número no registrado en WhatsApp'
                             });
+                            failedCount++;
+                            if (progressCallback) {
+                                progressCallback(sentCount, failedCount);
+                            }
                             continue;
                         }
                         console.log(`✅ Número verificado en WhatsApp: ${contact.number}`);
@@ -309,22 +354,31 @@ class WhatsAppServiceBaileys extends EventEmitter {
                         console.log(`⚠️ No se pudo verificar el número ${contact.number}, continuando...`);
                     }
 
-                    // Personalizar mensaje
                     const personalizedMessage = this.personalizeMessage(message, contact.name);
 
-                    // Enviar mensaje con reintentos
                     let messageSent = false;
                     let retries = 3;
                     
                     while (retries > 0 && !messageSent) {
                         try {
-                            await this.sock.sendMessage(jid, { text: personalizedMessage });
+                            if (imageBuffer) {
+                                await this.sock.sendMessage(jid, {
+                                    image: imageBuffer,
+                                    caption: personalizedMessage,
+                                    mimetype: imageMimetype,
+                                    jpegThumbnail: null,
+                                    fileName: `image_${Date.now()}.jpg`
+                                });
+                                console.log(`✅ Imagen + mensaje enviado a ${contact.name} (${contact.number})`);
+                            } else {
+                                await this.sock.sendMessage(jid, { text: personalizedMessage });
+                                console.log(`✅ Mensaje enviado a ${contact.name} (${contact.number})`);
+                            }
                             messageSent = true;
-                            console.log(`✅ Mensaje enviado a ${contact.name} (${contact.number}): "${personalizedMessage.substring(0, 50)}${personalizedMessage.length > 50 ? '...' : ''}"`);
                             
                         } catch (sendError) {
                             retries--;
-                            console.log(`❌ Error enviando mensaje a ${contact.number} (${retries} intentos restantes):`, sendError.message);
+                            console.log(`❌ Error enviando a ${contact.number} (${retries} intentos restantes):`, sendError.message);
                             
                             if (retries > 0) {
                                 await new Promise(resolve => setTimeout(resolve, 3000));
@@ -339,10 +393,16 @@ class WhatsAppServiceBaileys extends EventEmitter {
                         number: contact.number,
                         success: true,
                         timestamp: new Date(),
-                        sentMessage: personalizedMessage
+                        sentMessage: personalizedMessage,
+                        withImage: hasImage
                     });
+                    
+                    sentCount++;
+                    
+                    if (progressCallback) {
+                        progressCallback(sentCount, failedCount);
+                    }
 
-                    // Delay inteligente entre mensajes
                     if (i < contacts.length - 1) {
                         await this.intelligentDelay(i, contacts.length);
                     }
@@ -356,29 +416,33 @@ class WhatsAppServiceBaileys extends EventEmitter {
                         error: error.message
                     });
                     
-                    // Si es un error de conexión crítico, parar el envío
+                    failedCount++;
+                    
+                    if (progressCallback) {
+                        progressCallback(sentCount, failedCount);
+                    }
+                    
                     if (error.message.includes('Connection Closed') || 
                         error.message.includes('desconectado')) {
-                        console.error('🚨 Socket WhatsApp cerrado inesperadamente. Deteniendo envío.');
+                        console.error('🚨 Socket WhatsApp cerrado. Deteniendo envío.');
                         break;
                     }
                 }
             }
 
-            console.log(`🎯 Envío masivo completado: ${results.filter(r => r.success).length}/${results.length} mensajes exitosos`);
+            console.log(`🎯 Envío masivo completado: ${results.filter(r => r.success).length}/${results.length} exitosos`);
             
-            // ⚡ SEGURIDAD: Cerrar SOLO la sesión de WhatsApp, NO la sesión del usuario web
-            console.log('🔒 Programando cierre automático de la sesión de WhatsApp por seguridad...');
-            console.log('ℹ️ NOTA: Solo se cerrará WhatsApp, la sesión web del usuario permanece activa');
+            console.log('🔒 Programando cierre automático de sesión de WhatsApp...');
             setTimeout(async () => {
                 try {
-                    console.log('🔐 Cerrando sesión de WhatsApp automáticamente (usuario web sigue activo)...');
+                    console.log('🔐 Cerrando y limpiando sesión de WhatsApp automáticamente...');
                     await this.destroy();
-                    console.log('✅ Sesión de WhatsApp cerrada automáticamente - Usuario web sigue conectado');
+                    await this.clearUserCredentials(this.userId);
+                    console.log('✅ Sesión cerrada - Próxima conexión requerirá QR');
                 } catch (error) {
-                    console.log('⚠️ Error cerrando sesión automática de WhatsApp:', error.message);
+                    console.log('⚠️ Error cerrando sesión automática:', error.message);
                 }
-            }, 5000); // Esperar 5 segundos para asegurar que los mensajes se enviaron
+            }, 5000);
 
             return results;
             
@@ -386,28 +450,25 @@ class WhatsAppServiceBaileys extends EventEmitter {
             console.error('🚨 Error crítico en envío masivo:', error.message);
             throw error;
         } finally {
-            // 🛡️ Siempre desactivar flag de envío al finalizar
             this.isSending = false;
-            console.log('🔓 Modo envío desactivado - Reconexiones rehabilitadas (finally)');
+            console.log('🔓 Modo envío desactivado');
         }
     }
 
     async intelligentDelay(currentIndex, totalMessages) {
         let delay;
         
-        // Delays más largos cada ciertos mensajes
         if ((currentIndex + 1) % 50 === 0) {
-            delay = 300000; // 5 minutos cada 50 mensajes
+            delay = 300000;
         } else if ((currentIndex + 1) % 25 === 0) {
-            delay = 120000; // 2 minutos cada 25 mensajes
+            delay = 120000;
         } else if ((currentIndex + 1) % 10 === 0) {
-            delay = 60000; // 1 minuto cada 10 mensajes
+            delay = 60000;
         } else {
-            // Delay aleatorio entre 8-15 segundos
             delay = Math.floor(Math.random() * 7000) + 8000;
         }
 
-        console.log(`⏰ Esperando ${delay/1000} segundos antes del siguiente mensaje...`);
+        console.log(`⏰ Esperando ${delay/1000} segundos...`);
         await new Promise(resolve => setTimeout(resolve, delay));
     }
 
@@ -417,7 +478,6 @@ class WhatsAppServiceBaileys extends EventEmitter {
         }
 
         try {
-            // En Baileys, necesitamos obtener los contactos del store
             const contacts = Object.values(this.sock.store?.contacts || {});
             return contacts.map(contact => ({
                 id: contact.id,
@@ -434,24 +494,22 @@ class WhatsAppServiceBaileys extends EventEmitter {
         try {
             if (this.sock) {
                 console.log(`🔌 Cerrando conexión de WhatsApp para usuario ${this.userId || 'default'}...`);
-                console.log(`ℹ️ NOTA: Solo se cierra WhatsApp, la sesión web del usuario permanece activa`);
                 
                 this.isReady = false;
                 this.emit('disconnected', 'Manually disconnected');
                 
-                // Cerrar socket de WhatsApp
                 try {
                     await this.sock.logout();
                     console.log('📤 Logout de WhatsApp exitoso');
                 } catch (logoutError) {
-                    console.log('⚠️ Logout de WhatsApp error (ignorado):', logoutError.message);
+                    console.log('⚠️ Logout error (ignorado):', logoutError.message);
                 }
                 
                 this.sock = null;
-                console.log('✅ Socket de WhatsApp cerrado correctamente - Usuario web sigue activo');
+                console.log('✅ Socket cerrado correctamente');
             }
         } catch (error) {
-            console.error('❌ Error al destruir socket de WhatsApp:', error.message);
+            console.error('❌ Error al destruir socket:', error.message);
             this.sock = null;
             this.isReady = false;
         }
@@ -476,12 +534,12 @@ class WhatsAppServiceBaileys extends EventEmitter {
                     fs.rmSync(sessionPath, { recursive: true, force: true });
                     console.log(`🗑️ Credenciales eliminadas para usuario ${userId || this.userId}`);
                 } else {
-                    console.log(`ℹ️ No había credenciales para limpiar para usuario ${userId || this.userId}`);
+                    console.log(`ℹ️ No había credenciales para limpiar`);
                 }
                 
                 resolve(true);
             } catch (error) {
-                console.error(`❌ Error limpiando credenciales para usuario ${userId || this.userId}:`, error);
+                console.error(`❌ Error limpiando credenciales:`, error);
                 resolve(false);
             }
         });

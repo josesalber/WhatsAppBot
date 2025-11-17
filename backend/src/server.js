@@ -21,10 +21,10 @@ const PORT = process.env.PORT || 3001;
 
 // Configuración dinámica de CORS
 const allowedOrigins = [
-    process.env.FRONTEND_URL || 'http://172.17.249.85:3000',
-    'http://172.17.249.85:3000',
-    'http://172.17.249.85:3000',
-    'http://127.0.0.1:3000'
+    process.env.FRONTEND_URL || 'http://172.17.248.185:3000',
+    'http://172.17.248.185:3000',
+    'http://172.17.248.185:3000',
+
 ];
 
 // Agregar origen adicional si está definido en variables de entorno
@@ -37,7 +37,7 @@ const corsOptions = {
     origin: function (origin, callback) {
         // Permitir requests sin origin (aplicaciones móviles, Postman, etc.)
         if (!origin) return callback(null, true);
-        
+
         if (allowedOrigins.indexOf(origin) !== -1) {
             callback(null, true);
         } else {
@@ -73,8 +73,8 @@ app.use('/api/admin', adminRoutes);
 
 // Ruta de health check
 app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
+    res.json({
+        status: 'OK',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
         port: PORT,
@@ -99,7 +99,7 @@ app.get('/api/cors-test', (req, res) => {
 // Servir archivos estáticos del frontend en producción
 if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.join(__dirname, '../../frontend/build')));
-    
+
     app.get('*', (req, res) => {
         res.sendFile(path.join(__dirname, '../../frontend/build/index.html'));
     });
@@ -108,7 +108,7 @@ if (process.env.NODE_ENV === 'production') {
 // Middleware de manejo de errores
 app.use((err, req, res, next) => {
     console.error('Error:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
         error: 'Error interno del servidor',
         message: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -122,14 +122,14 @@ app.use('*', (req, res) => {
 // Inicializar servidor
 async function startServer() {
     try {
-        console.log('� Iniciando servidor en modo PRODUCCIÓN...');
+        console.log('🎬 Iniciando servidor en modo PRODUCCIÓN...');
         console.log('⏭️ Saltando creación de tablas (modo producción)');
-        
-        const host = process.env.BACKEND_HOST || '172.17.249.85';
+
+        const host = process.env.BACKEND_HOST || 'localhost';
         app.listen(PORT, host, () => {
             console.log(`🚀 Servidor ejecutándose en http://${host}:${PORT}`);
             console.log(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
-            console.log(`🖥️ Frontend URL: ${process.env.FRONTEND_URL || 'http://172.17.249.85:3000'}`);
+            console.log(`🖥️ Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
             console.log(`🔗 CORS configurado para:`, allowedOrigins);
         });
 
